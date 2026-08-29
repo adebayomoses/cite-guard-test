@@ -66,6 +66,35 @@ jobs:
 
           echo "dir=_export" >> "$GITHUB_OUTPUT"
 
+      - name: Remove any pre-existing build output
+        working-directory: ${{ steps.source.outputs.dir }}
+        run: |
+          # A repo can end up with committed build output sitting
+          # alongside its source — e.g. an export that bundled a
+          # static-export/ folder together with the raw source it was
+          # built from, or a .gitignore that doesn't exclude dist/.
+          # Left in place, that's indistinguishable from a genuine
+          # fresh build to "Locate build output" below, so it would get
+          # used as-is without this workflow ever actually building
+          # anything — potentially stale or incomplete (verified
+          # against a real repo: a bundled static-export/ missing
+          # images its own export process never actually downloaded).
+          # Removing every recognized output location up front
+          # guarantees whatever's found later only ever came from this
+          # run.
+          removed=""
+          for dir in static-export dist build out .output; do
+            if [ -e "$dir" ]; then
+              rm -rf "$dir"
+              removed="$removed $dir"
+            fi
+          done
+          if [ -n "$removed" ]; then
+            echo "Removed pre-existing build output before building fresh:$removed"
+          else
+            echo "No pre-existing build output found — nothing to remove."
+          fi
+
       - name: Detect package manager
         id: detect
         working-directory: ${{ steps.source.outputs.dir }}
@@ -160,6 +189,11 @@ jobs:
             return 1
           }
 
+          # Whatever find_output() sees from here on can only be
+          # something this run actually produced — the previous step
+          # already removed every recognized output location that
+          # might otherwise have been a stale leftover from the repo
+          # itself.
           if out=$(find_output); then
             echo "dir=$out" >> "$GITHUB_OUTPUT"
             echo "Found build output in: $out"
@@ -195,12 +229,18 @@ jobs:
               echo "Bridged .output/public -> dist/client"
             fi
 
+            export_exit=0
             case "${{ steps.detect.outputs.manager }}" in
-              npm)  npm run "$script" ;;
-              yarn) yarn "$script" ;;
-              pnpm) pnpm "$script" ;;
-              bun)  bun run "$script" ;;
+              npm)  npm run "$script" || export_exit=$? ;;
+              yarn) yarn "$script" || export_exit=$? ;;
+              pnpm) pnpm "$script" || export_exit=$? ;;
+              bun)  bun run "$script" || export_exit=$? ;;
             esac
+
+            if [ "$export_exit" -ne 0 ]; then
+              echo "::error::\"$script\" exited with code $export_exit. See the log above for details — an output folder that shows up anyway despite this is incomplete, not a real success."
+              exit "$export_exit"
+            fi
 
             break
           done
