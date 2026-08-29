@@ -1,0 +1,87 @@
+name: Build for Esipher
+
+# Runs on every push (i.e. every time someone uploads/commits their
+# project's files here), and can also be triggered manually from the
+# Actions tab. Detects whichever of npm/yarn/pnpm/bun the project
+# actually uses, installs dependencies, runs its build script, finds
+# the resulting output folder, and uploads it as a downloadable
+# artifact — the zip you then upload to the Esipher WordPress plugin.
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Detect package manager
+        id: detect
+        run: |
+          if [ -f bun.lock ] || [ -f bun.lockb ]; then
+            manager=bun
+          elif [ -f pnpm-lock.yaml ]; then
+            manager=pnpm
+          elif [ -f yarn.lock ]; then
+            manager=yarn
+          else
+            manager=npm
+          fi
+          echo "Detected: $manager"
+          echo "manager=$manager" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        if: steps.detect.outputs.manager != 'bun'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up pnpm
+        if: steps.detect.outputs.manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Bun
+        if: steps.detect.outputs.manager == 'bun'
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: |
+          case "${{ steps.detect.outputs.manager }}" in
+            npm)  npm install ;;
+            yarn) yarn install ;;
+            pnpm) pnpm install ;;
+            bun)  bun install ;;
+          esac
+
+      - name: Build
+        run: |
+          case "${{ steps.detect.outputs.manager }}" in
+            npm)  npm run build ;;
+            yarn) yarn build ;;
+            pnpm) pnpm build ;;
+            bun)  bun run build ;;
+          esac
+
+      - name: Locate build output
+        id: output
+        run: |
+          for dir in dist build out .output/public; do
+            if [ -d "$dir" ]; then
+              echo "dir=$dir" >> "$GITHUB_OUTPUT"
+              echo "Found build output in: $dir"
+              exit 0
+            fi
+          done
+          echo "::error::No build output folder found (looked for dist/, build/, out/, .output/public/). Check the 'Build' step's log above for the actual error."
+          exit 1
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: esipher-build
+          path: ${{ steps.output.outputs.dir }}
+          if-no-files-found: error
