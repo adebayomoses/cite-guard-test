@@ -6,9 +6,21 @@ name: Build for Esipher
 # file -> Upload files", with no local unzipping needed), it's
 # extracted first. Either way, this then detects whichever of
 # npm/yarn/pnpm/bun the project uses, installs dependencies, runs its
-# build script, finds the resulting output folder, and uploads it as a
-# downloadable artifact — the zip you then upload to the Esipher
-# WordPress plugin.
+# build script, and uploads the result as a downloadable artifact — the
+# zip you then upload to the Esipher WordPress plugin.
+#
+# Mirrors the same build intelligence Esipher's own "Build it now"
+# button uses (Project_Builder), so a project this workflow can build,
+# Esipher can too, and vice versa:
+#  - Detects Lovable's cloud-hosted image descriptors and sets
+#    ASSET_ORIGIN so the project's own asset-download step (if it has
+#    one) can actually reach them, instead of silently failing every
+#    image.
+#  - Falls back to an export-static-style script (some frameworks, e.g.
+#    TanStack Start, need a second script after the plain build to
+#    pre-render every route to real HTML).
+#  - Bridges Nitro's actual build output to the path some of those
+#    export scripts hardcode expecting, when the two are out of sync.
 
 on:
   push:
@@ -20,7 +32,7 @@ jobs:
 
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Extract uploaded export .zip, if any
         id: source
@@ -94,6 +106,32 @@ jobs:
             bun)  bun install ;;
           esac
 
+      - name: Detect Lovable cloud-hosted image origin
+        working-directory: ${{ steps.source.outputs.dir }}
+        run: |
+          if [ -n "$ASSET_ORIGIN" ]; then
+            echo "ASSET_ORIGIN already set in the environment — leaving it alone."
+            exit 0
+          fi
+
+          descriptor=$(find src/assets -maxdepth 4 -iname '*.asset.json' 2>/dev/null | head -1)
+
+          if [ -z "$descriptor" ]; then
+            echo "No Lovable *.asset.json descriptor found — nothing to detect."
+            exit 0
+          fi
+
+          project_id=$(grep -oE '"project_id"[[:space:]]*:[[:space:]]*"[^"]+"' "$descriptor" | sed -E 's/.*:[[:space:]]*"([^"]+)"/\1/' | head -1)
+
+          if [ -z "$project_id" ]; then
+            echo "Found a descriptor but couldn't read its project_id — skipping."
+            exit 0
+          fi
+
+          origin="https://${project_id}.lovableproject.com"
+          echo "Detected Lovable cloud-hosted image references — setting ASSET_ORIGIN=$origin"
+          echo "ASSET_ORIGIN=$origin" >> "$GITHUB_ENV"
+
       - name: Build
         working-directory: ${{ steps.source.outputs.dir }}
         run: |
@@ -108,18 +146,76 @@ jobs:
         id: output
         working-directory: ${{ steps.source.outputs.dir }}
         run: |
-          for dir in dist build out .output/public; do
-            if [ -d "$dir" ]; then
-              echo "dir=$dir" >> "$GITHUB_OUTPUT"
-              echo "Found build output in: $dir"
-              exit 0
+          find_output() {
+            for dir in dist build out .output/public; do
+              if [ -d "$dir" ] && { [ -f "$dir/index.html" ] || [ -d "$dir/static-export" ]; }; then
+                echo "$dir"
+                return 0
+              fi
+            done
+            if [ -d "static-export" ]; then
+              echo "static-export"
+              return 0
             fi
+            return 1
+          }
+
+          if out=$(find_output); then
+            echo "dir=$out" >> "$GITHUB_OUTPUT"
+            echo "Found build output in: $out"
+            exit 0
+          fi
+
+          # Nothing recognizable from the plain build yet. Some projects
+          # (TanStack Start/Nitro among them) ship a separate script that
+          # pre-renders every route to real HTML as a second step — try
+          # that next, same as Esipher's own Project_Builder does.
+          for script in export:static export-static static:export; do
+            if ! grep -q "\"$script\"" package.json 2>/dev/null; then
+              continue
+            fi
+
+            echo "Trying the '$script' script..."
+
+            # Bridge Nitro's actual build output to the paths some
+            # export scripts hardcode expecting (dist/server,
+            # dist/client) — verified necessary against a real export
+            # whose own script otherwise fails with "Build output
+            # missing" despite the build above having just succeeded.
+            # Never overwrites an existing dist/ — only fires when the
+            # script's expected path is genuinely missing.
+            if [ -d .output/server ] && [ ! -e dist/server ]; then
+              mkdir -p dist
+              cp -r .output/server dist/server
+              echo "Bridged .output/server -> dist/server"
+            fi
+            if [ -d .output/public ] && [ ! -e dist/client ]; then
+              mkdir -p dist
+              cp -r .output/public dist/client
+              echo "Bridged .output/public -> dist/client"
+            fi
+
+            case "${{ steps.detect.outputs.manager }}" in
+              npm)  npm run "$script" ;;
+              yarn) yarn "$script" ;;
+              pnpm) pnpm "$script" ;;
+              bun)  bun run "$script" ;;
+            esac
+
+            break
           done
-          echo "::error::No build output folder found (looked for dist/, build/, out/, .output/public/). Check the 'Build' step's log above for the actual error."
+
+          if out=$(find_output); then
+            echo "dir=$out" >> "$GITHUB_OUTPUT"
+            echo "Found build output in: $out"
+            exit 0
+          fi
+
+          echo "::error::No build output folder found (looked for dist/, build/, out/, .output/public/, static-export/). Check the 'Build' step's log above for the actual error."
           exit 1
 
       - name: Upload build output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: esipher-build
           path: ${{ steps.source.outputs.dir }}/${{ steps.output.outputs.dir }}
