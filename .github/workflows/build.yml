@@ -214,9 +214,39 @@ jobs:
           echo "::error::No build output folder found (looked for dist/, build/, out/, .output/public/, static-export/). Check the 'Build' step's log above for the actual error."
           exit 1
 
+      - name: Prepare artifact contents
+        id: artifact
+        working-directory: ${{ steps.source.outputs.dir }}
+        run: |
+          out="${{ steps.output.outputs.dir }}"
+
+          # actions/upload-artifact zips the *contents* of whatever path
+          # it's given — it never preserves that path's own folder name
+          # inside the resulting archive. That's harmless for a
+          # single-page build (dist/, build/, ...): Esipher just needs
+          # index.html at the zip root either way, which flattening
+          # still gives it. It's a real problem specifically when $out
+          # is the multi-page static-export/ folder found directly at
+          # the project root: Esipher's Source_Detector::
+          # resolve_multi_page_root() looks for a folder literally named
+          # static-export, so uploading its contents flattened makes
+          # Esipher silently (mis)detect an ordinary single-page export
+          # instead — converting only the home route and leaving every
+          # other page showing nothing but that same home content, with
+          # no error to explain why. Re-wrap it here so the artifact
+          # keeps that name.
+          if [ "$out" = "static-export" ]; then
+            rm -rf _artifact
+            mkdir -p _artifact/static-export
+            cp -r static-export/. _artifact/static-export/
+            echo "path=$(pwd)/_artifact" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=$(pwd)/$out" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload build output
         uses: actions/upload-artifact@v7
         with:
           name: esipher-build
-          path: ${{ steps.source.outputs.dir }}/${{ steps.output.outputs.dir }}
+          path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
