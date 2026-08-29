@@ -1,11 +1,14 @@
 name: Build for Esipher
 
-# Runs on every push (i.e. every time someone uploads/commits their
-# project's files here), and can also be triggered manually from the
-# Actions tab. Detects whichever of npm/yarn/pnpm/bun the project
-# actually uses, installs dependencies, runs its build script, finds
-# the resulting output folder, and uploads it as a downloadable
-# artifact — the zip you then upload to the Esipher WordPress plugin.
+# Runs on every push (i.e. every time someone commits files here), and
+# can also be triggered manually from the Actions tab. If a .zip sits
+# at the repo root (the natural thing to drag in via GitHub's "Add
+# file -> Upload files", with no local unzipping needed), it's
+# extracted first. Either way, this then detects whichever of
+# npm/yarn/pnpm/bun the project uses, installs dependencies, runs its
+# build script, finds the resulting output folder, and uploads it as a
+# downloadable artifact — the zip you then upload to the Esipher
+# WordPress plugin.
 
 on:
   push:
@@ -19,8 +22,41 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@v4
 
+      - name: Extract uploaded export .zip, if any
+        id: source
+        run: |
+          zip_file=$(find . -maxdepth 1 -iname '*.zip' | head -1)
+
+          if [ -z "$zip_file" ]; then
+            echo "No .zip at the repo root — using the repo's files as-is."
+            echo "dir=." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found $zip_file — extracting..."
+          mkdir -p _export
+          unzip -q "$zip_file" -d _export
+
+          # Many exports (GitHub's own "Download ZIP" among them) wrap
+          # everything in a single top-level folder. Unwrap it so the
+          # steps below find package.json etc. directly, rather than
+          # one folder too deep — same idea as Esipher's own
+          # Source_Detector::resolve_root().
+          entry_count=$(find _export -mindepth 1 -maxdepth 1 | wc -l)
+
+          if [ "$entry_count" -eq 1 ]; then
+            only_entry=$(find _export -mindepth 1 -maxdepth 1)
+            if [ -d "$only_entry" ]; then
+              echo "dir=$only_entry" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "dir=_export" >> "$GITHUB_OUTPUT"
+
       - name: Detect package manager
         id: detect
+        working-directory: ${{ steps.source.outputs.dir }}
         run: |
           if [ -f bun.lock ] || [ -f bun.lockb ]; then
             manager=bun
@@ -49,6 +85,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
+        working-directory: ${{ steps.source.outputs.dir }}
         run: |
           case "${{ steps.detect.outputs.manager }}" in
             npm)  npm install ;;
@@ -58,6 +95,7 @@ jobs:
           esac
 
       - name: Build
+        working-directory: ${{ steps.source.outputs.dir }}
         run: |
           case "${{ steps.detect.outputs.manager }}" in
             npm)  npm run build ;;
@@ -68,6 +106,7 @@ jobs:
 
       - name: Locate build output
         id: output
+        working-directory: ${{ steps.source.outputs.dir }}
         run: |
           for dir in dist build out .output/public; do
             if [ -d "$dir" ]; then
@@ -83,5 +122,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: esipher-build
-          path: ${{ steps.output.outputs.dir }}
+          path: ${{ steps.source.outputs.dir }}/${{ steps.output.outputs.dir }}
           if-no-files-found: error
